@@ -20,6 +20,7 @@ public iOS client and Mac host protocol.
 - Agent activity feed, Android notifications, deep links, reconcile/read/dismiss
 - Workspace changes, diffs, current/base file preview, and file export
 - Saved multi-Mac registry with one-tap switching between connected hosts
+- Live connection pool with per-Mac status and explicit connect-all action
 
 The Iroh JNI libraries are built from cmux's pinned `manaflow-ai/iroh-ffi`
 fork (`v1.0.2-cmux.7`) for `arm64-v8a` and `x86_64`.
@@ -38,8 +39,9 @@ the Mac, so the Mac's existing proxy and credentials remain authoritative.
 Use **Find my Macs** to discover every pairable Mac on the signed-in cmux
 account. Each selected Mac is saved locally on the phone and can be reopened
 locally from the **Mac:** switcher in the workspace screen. Manual Tailscale
-hosts are saved too. Android keeps one active cmux connection at a time; each Mac remains
-authoritative for its own workspaces and terminal state.
+hosts are saved too. Android keeps connected hosts alive while the app is open;
+the selected Mac owns the active terminal view. Each Mac remains authoritative
+for its own workspaces and terminal state.
 
 The saved registry contains only display and route metadata. Iroh identities and
 account credentials remain in the Android Keystore-backed store.

@@ -59,6 +59,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.HashSet;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -93,10 +95,13 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
     private final AtomicBoolean browserScrollRunning = new AtomicBoolean();
     private final AtomicBoolean chatRefreshPending = new AtomicBoolean();
     private final Handler reconnectHandler = new Handler(Looper.getMainLooper());
+    private final Map<String, Integer> reconnectAttemptsByMachine = new HashMap<>();
+    private final Map<String, String> machineErrors = new HashMap<>();
     private final Object browserScrollLock = new Object();
     private final RenderGrid grid = new RenderGrid();
     private StackAuthClient auth;
     private MachineRegistry machineRegistry;
+    private MachineConnectionManager connections;
     private CmuxClient client;
     private LinearLayout root;
     private TextView status;
@@ -179,6 +184,21 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
             .getBoolean("wrap_workspace_titles", false);
         auth = new StackAuthClient(new SecureTokenStore(this));
         machineRegistry = new MachineRegistry(getSharedPreferences("machines", MODE_PRIVATE));
+        connections = new MachineConnectionManager(this, auth, new MachineConnectionManager.Listener() {
+            @Override public void onStateChanged(String machineId, MachineConnectionManager.State state,
+                                                  String message) {
+                runOnUiThread(() -> onMachineStateChanged(machineId, state, message));
+            }
+
+            @Override public void onEvent(String machineId, String topic, JSONObject payload) {
+                if (machineId.equals(activeMachineId)) MainActivity.this.onEvent(topic, payload);
+                else onBackgroundMachineEvent(machineId, topic, payload);
+            }
+
+            @Override public void onDisconnected(String machineId, String message) {
+                runOnUiThread(() -> onMachineDisconnected(machineId, message));
+            }
+        });
         if (state != null) {
             otpNonce = state.getString("otp_nonce");
             pendingPairingLink = state.getString("pairing_link");
@@ -281,6 +301,7 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
             localBrowser.destroy();
             localBrowser = null;
         }
+        if (connections != null) connections.close();
         if (client != null) client.close();
         worker.shutdownNow();
         browserDecoder.shutdownNow();
@@ -400,8 +421,12 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         if (!savedMachines.isEmpty()) {
             sectionLabel("Saved Macs");
             for (MachineRegistry.Machine machine : savedMachines) {
-                Button saved = secondaryButton(machine.displayName());
+                Button saved = secondaryButton(machine.displayName() + " · " + machineStatusLabel(machine));
                 saved.setOnClickListener(view -> connectMachine(machine, saved, false));
+            }
+            if (savedMachines.size() > 1) {
+                Button connectAll = secondaryButton("Connect all saved Macs");
+                connectAll.setOnClickListener(view -> connectAllMachines(savedMachines, connectAll));
             }
         }
         sectionLabel("Private network");
@@ -456,7 +481,8 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         signOut.setOnClickListener(view -> {
             connectedIrohEndpoint = null;
             reconnectHandler.removeCallbacksAndMessages(null);
-            if (client != null) client.close();
+            if (connections != null) connections.disconnectAll();
+            client = null;
             machineRegistry.clear();
             activeMachineId = null;
             auth.signOut();
@@ -499,7 +525,6 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
 
     private void connectMachine(MachineRegistry.Machine machine, Button source, boolean automatic) {
         if (machine.isIroh()) {
-            connectedIrohEndpoint = machine.endpointId();
             connectIroh(machine.endpointId(), source, automatic);
         } else {
             connectToRoutes(java.util.List.of(
@@ -600,34 +625,24 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
 
     private void connectIroh(String endpointId, Button source, boolean automatic) {
         String retryLabel = source.getText().toString();
-        connectedIrohEndpoint = endpointId;
         connecting = true;
         busy(source, true, "Connecting…");
         worker.execute(() -> {
             try {
-                if (client != null) client.close();
-                client = new CmuxClient(auth, this);
-                client.connect(IrohWireConnection.connect(getApplicationContext(), auth, endpointId));
-                workspaceSnapshot = client.listWorkspaces();
-                JSONObject host = client.status();
-                MachineRegistry.Machine machine = MachineRegistry.Machine.iroh(endpointId,
+                MachineRegistry.Machine candidate = MachineRegistry.Machine.iroh(endpointId, "Mac");
+                JSONObject snapshot = connections.connect(candidate);
+                CmuxClient connected = connections.client(candidate.id());
+                if (connected == null) throw new IllegalStateException("Mac connection disappeared");
+                JSONObject host = connected.status();
+                MachineRegistry.Machine machine = candidate.named(
                     host.optString("mac_display_name", "Mac"));
                 machineRegistry.upsert(machine);
-                activeMachineId = machine.id();
-                String account = auth.accountFingerprint();
-                if (!getSharedPreferences("connection", MODE_PRIVATE).edit()
-                    .remove("host").remove("port")
-                    .putString("iroh_endpoint", endpointId).putString("iroh_account", account)
-                    .putString("active_machine_id", machine.id()).commit()) {
-                    throw new IllegalStateException("Could not save the connected Mac");
-                }
                 connecting = false;
                 reconnectAttempts = 0;
-                connectedIrohEndpoint = endpointId;
-                runOnUiThread(() -> showWorkspaces(workspaceSnapshot));
+                reconnectAttemptsByMachine.remove(machine.id());
+                runOnUiThread(() -> activateMachine(machine, snapshot));
             } catch (Exception error) {
                 connecting = false;
-                if (client != null) client.close();
                 if (automatic) scheduleReconnect(errorMessage(error));
                 else fail(source, retryLabel, error);
             }
@@ -639,7 +654,6 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
             if (isFinishing() || isDestroyed() || !auth.hasSession()) return;
             showConnect();
             SharedPreferences preferences = getSharedPreferences("connection", MODE_PRIVATE);
-            String endpoint = connectedIrohEndpoint;
             MachineRegistry.Machine machine = findMachine(activeMachineId);
             String account = preferences.getString("iroh_account", null);
             try {
@@ -656,11 +670,78 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
             message("Reconnecting in " + delaySeconds + "s…");
             reconnectHandler.removeCallbacksAndMessages(null);
             reconnectHandler.postDelayed(() -> {
-                if (!connecting && currentScreen == CONNECT && reconnectButton != null) {
-                    if (machine.isIroh()) connectIroh(endpoint, reconnectButton, true);
-                    else connectMachine(machine, reconnectButton, true);
+                if (connections.state(machine.id()) != MachineConnectionManager.State.CONNECTED
+                    && connections.state(machine.id()) != MachineConnectionManager.State.CONNECTING
+                    && currentScreen == CONNECT && reconnectButton != null) {
+                    connectMachine(machine, reconnectButton, true);
                 }
             }, delaySeconds * 1000L);
+        });
+    }
+
+    private void onMachineStateChanged(String machineId, MachineConnectionManager.State state,
+                                       String message) {
+        if (state == MachineConnectionManager.State.CONNECTED) machineErrors.remove(machineId);
+        else if (message != null && !message.isBlank()) machineErrors.put(machineId, message);
+        if (machineId.equals(activeMachineId) && status != null
+            && state != MachineConnectionManager.State.CONNECTED) {
+            message(currentMachineLabel() + ": " + message);
+        }
+    }
+
+    private void onMachineDisconnected(String machineId, String reason) {
+        if (machineId.equals(activeMachineId)) scheduleReconnect(reason);
+    }
+
+    private void onBackgroundMachineEvent(String machineId, String topic, JSONObject payload) {
+        if (!"notification.badge".equals(topic)) return;
+        int count = Math.max(0, payload.optInt("unread_count", 0));
+        if (count == 0) machineErrors.remove(machineId);
+        else machineErrors.put(machineId, count + " unread notification" + (count == 1 ? "" : "s"));
+    }
+
+    private String machineStatusLabel(MachineRegistry.Machine machine) {
+        MachineConnectionManager.State state = connections.state(machine.id());
+        if (state == MachineConnectionManager.State.CONNECTED) return "online";
+        if (state == MachineConnectionManager.State.CONNECTING) return "connecting";
+        if (state == MachineConnectionManager.State.ERROR) return "offline";
+        return "saved";
+    }
+
+    private void connectAllMachines(java.util.List<MachineRegistry.Machine> machines, Button source) {
+        busy(source, true, "Connecting Macs…");
+        worker.execute(() -> {
+            int connectedCount = 0;
+            MachineRegistry.Machine first = null;
+            JSONObject firstSnapshot = null;
+            try {
+                for (MachineRegistry.Machine machine : machines) {
+                    try {
+                        JSONObject snapshot = connections.connect(machine);
+                        connectedCount++;
+                        if (first == null) {
+                            first = machine;
+                            firstSnapshot = snapshot;
+                        }
+                    } catch (Exception ignored) {}
+                }
+                MachineRegistry.Machine active = findMachine(activeMachineId);
+                JSONObject activeSnapshot = active == null ? null : connections.snapshot(active.id());
+                if (active != null && activeSnapshot != null) {
+                    first = active;
+                    firstSnapshot = activeSnapshot;
+                }
+                MachineRegistry.Machine selected = first;
+                JSONObject selectedSnapshot = firstSnapshot;
+                int total = connectedCount;
+                runOnUiThread(() -> {
+                    busy(source, false, "Connect all saved Macs");
+                    if (selected != null) activateMachine(selected, selectedSnapshot);
+                    message(total + " Mac" + (total == 1 ? "" : "s") + " connected");
+                });
+            } catch (Exception error) {
+                fail(source, "Connect all saved Macs", error);
+            }
         });
     }
 
@@ -684,23 +765,15 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
                     try {
                         MachineRegistry.Machine routeMachine = MachineRegistry.Machine.tcp(
                             route.host(), route.port(), route.host());
-                        if (client != null) client.close();
-                        client = new CmuxClient(auth, this);
-                        client.connect(route.host(), route.port());
-                        workspaceSnapshot = client.listWorkspaces();
+                        JSONObject snapshot = connections.connect(routeMachine);
+                        CmuxClient connected = connections.client(routeMachine.id());
+                        if (connected == null) throw new IllegalStateException("Mac connection disappeared");
                         connectedIrohEndpoint = null;
                         MachineRegistry.Machine machine = routeMachine.named(
-                            client.status().optString("mac_display_name", route.host()));
+                            connected.status().optString("mac_display_name", route.host()));
                         machineRegistry.upsert(machine);
-                        activeMachineId = machine.id();
-                        String account = auth.accountFingerprint();
-                        getSharedPreferences("connection", MODE_PRIVATE).edit()
-                            .remove("iroh_endpoint")
-                            .putString("host", route.host()).putInt("port", route.port())
-                            .putString("active_machine_id", machine.id())
-                            .putString("iroh_account", account).apply();
                         connecting = false;
-                        runOnUiThread(() -> showWorkspaces(workspaceSnapshot));
+                        runOnUiThread(() -> activateMachine(machine, snapshot));
                         return;
                     } catch (Exception error) {
                         last = error;
@@ -709,11 +782,31 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
                 throw last == null ? new IllegalStateException("No pairing routes") : last;
             } catch (Exception error) {
                 connecting = false;
-                if (client != null) client.close();
                 if (automatic) scheduleReconnect(errorMessage(error));
                 else fail(source, retryLabel, error);
             }
         });
+    }
+
+    private void activateMachine(MachineRegistry.Machine machine, JSONObject snapshot) {
+        clearTerminalViewport();
+        activeMachineId = machine.id();
+        client = connections.client(machine.id());
+        workspaceSnapshot = snapshot;
+        SharedPreferences.Editor preferences = getSharedPreferences("connection", MODE_PRIVATE).edit()
+            .putString("active_machine_id", machine.id());
+        try {
+            preferences.putString("iroh_account", auth.accountFingerprint());
+        } catch (Exception ignored) {}
+        if (machine.isIroh()) {
+            preferences.remove("host").remove("port")
+                .putString("iroh_endpoint", machine.endpointId());
+        } else {
+            preferences.remove("iroh_endpoint")
+                .putString("host", machine.host()).putInt("port", machine.port());
+        }
+        preferences.apply();
+        showWorkspaces(snapshot);
     }
 
     private void showWorkspaces(JSONObject snapshot) {
@@ -855,7 +948,9 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         for (int i = 0; i < machines.size(); i++) {
             MachineRegistry.Machine machine = machines.get(i);
             labels[i] = machine.displayName()
-                + (machine.id().equals(activeMachineId) ? " · connected" : "");
+                + " · " + machineStatusLabel(machine)
+                + (machineErrors.containsKey(machine.id())
+                    ? " · " + bounded(machineErrors.get(machine.id()), 80) : "");
         }
         new AlertDialog.Builder(this).setTitle("Switch Mac").setItems(labels, (dialog, which) -> {
             MachineRegistry.Machine machine = machines.get(which);
@@ -959,7 +1054,8 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         disconnect.setOnClickListener(view -> {
             connectedIrohEndpoint = null;
             reconnectHandler.removeCallbacksAndMessages(null);
-            if (client != null) client.close();
+            if (activeMachineId != null) connections.disconnect(activeMachineId);
+            client = null;
             showConnect();
         });
         if (findMachine(activeMachineId) != null) {
@@ -969,14 +1065,16 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
                 .setMessage("The saved connection will be removed from this phone.")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Forget", (dialog, which) -> {
+                    String forgottenMachineId = activeMachineId;
                     connectedIrohEndpoint = null;
                     reconnectHandler.removeCallbacksAndMessages(null);
-                    machineRegistry.remove(activeMachineId);
+                    machineRegistry.remove(forgottenMachineId);
                     activeMachineId = null;
                     getSharedPreferences("connection", MODE_PRIVATE).edit()
                         .remove("iroh_endpoint").remove("host").remove("port")
                         .remove("active_machine_id").remove("iroh_account").apply();
-                    if (client != null) client.close();
+                    if (forgottenMachineId != null) connections.disconnect(forgottenMachineId);
+                    client = null;
                     showConnect();
                 }).show());
         }
