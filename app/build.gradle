@@ -1,0 +1,40 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+}
+
+android {
+    namespace "dev.cmux.android"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "dev.cmux.android"
+        minSdk 26
+        targetSdk 36
+        versionCode 64022
+        versionName "0.64.22-android.1"
+
+        testInstrumentationRunner "android.test.InstrumentationTestRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation files("libs/iroh-ffi-cmux7.jar")
+    implementation files("libs/iroh-android-cmux7.aar")
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1"
+    implementation "net.java.dev.jna:jna:5.15.0@aar"
+    implementation "com.google.android.gms:play-services-code-scanner:16.1.0"
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
+}
