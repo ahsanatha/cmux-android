@@ -158,6 +158,7 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
     private String chatImagePickerSession;
     private String pendingNotificationWorkspace;
     private String pendingNotificationSurface;
+    private String pendingNotificationMachine;
     private Button chatAttachmentButton;
     private byte[] pendingArtifactBytes;
 
@@ -202,10 +203,12 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         if (state != null) {
             otpNonce = state.getString("otp_nonce");
             pendingPairingLink = state.getString("pairing_link");
+            pendingNotificationMachine = state.getString("notification_machine");
         }
         capturePairingIntent(getIntent());
         captureNotificationIntent(getIntent());
         if (auth.hasSession()) showConnect(); else showSignIn();
+        if (auth.hasSession()) syncBackgroundMonitor();
         reconnectHandler.postDelayed(
             () -> updateChecker().checkSilently(), 4_000);
     }
@@ -220,6 +223,7 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         super.onSaveInstanceState(out);
         out.putString("otp_nonce", otpNonce);
         out.putString("pairing_link", pendingPairingLink);
+        out.putString("notification_machine", pendingNotificationMachine);
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -227,7 +231,8 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         setIntent(intent);
         capturePairingIntent(intent);
         captureNotificationIntent(intent);
-        if (client != null && workspaceSnapshot != null && pendingNotificationWorkspace != null) {
+        if (client != null && workspaceSnapshot != null
+            && (pendingNotificationWorkspace != null || pendingNotificationMachine != null)) {
             openPendingNotification();
         } else if (auth != null && auth.hasSession()) showConnect();
     }
@@ -483,6 +488,7 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
             reconnectHandler.removeCallbacksAndMessages(null);
             if (connections != null) connections.disconnectAll();
             client = null;
+            BackgroundMonitorService.stop(this);
             machineRegistry.clear();
             activeMachineId = null;
             auth.signOut();
@@ -490,6 +496,9 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         });
         if (pendingPairingLink != null) {
             connectPairing(pendingPairingLink, usePairing);
+        } else if (pendingNotificationMachine != null) {
+            MachineRegistry.Machine machine = findMachine(pendingNotificationMachine);
+            if (machine != null) connectMachine(machine, findMacs, false);
         } else if (!attemptedSessionRestore) {
             attemptedSessionRestore = true;
             String endpoint = prefs.getString("iroh_endpoint", null);
@@ -591,10 +600,13 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         if (intent == null) return;
         String workspace = intent.getStringExtra("notification_workspace_id");
         String surface = intent.getStringExtra("notification_surface_id");
+        String machine = intent.getStringExtra("notification_machine_id");
         if (safeIdentifier(workspace)) pendingNotificationWorkspace = workspace;
         if (safeIdentifier(surface)) pendingNotificationSurface = surface;
+        if (safeIdentifier(machine)) pendingNotificationMachine = machine;
         intent.removeExtra("notification_workspace_id");
         intent.removeExtra("notification_surface_id");
+        intent.removeExtra("notification_machine_id");
     }
 
     private static boolean safeIdentifier(String value) {
@@ -1093,6 +1105,16 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
             getSharedPreferences("notifications", MODE_PRIVATE).edit()
                 .putBoolean("enabled", enabled).apply();
             if (!enabled) clearSystemNotifications();
+            syncBackgroundMonitor();
+            showSettings();
+        });
+        Button backgroundMonitor = secondaryButton(backgroundMonitoringEnabled()
+            ? "Stop background monitoring" : "Monitor Macs in background");
+        backgroundMonitor.setOnClickListener(view -> {
+            boolean enabled = !backgroundMonitoringEnabled();
+            getSharedPreferences("notifications", MODE_PRIVATE).edit()
+                .putBoolean("background_monitor", enabled).apply();
+            syncBackgroundMonitor();
             showSettings();
         });
 
@@ -3388,6 +3410,19 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
             .getBoolean("enabled", true);
     }
 
+    private boolean backgroundMonitoringEnabled() {
+        return getSharedPreferences("notifications", MODE_PRIVATE)
+            .getBoolean("background_monitor", false);
+    }
+
+    private void syncBackgroundMonitor() {
+        if (backgroundMonitoringEnabled() && notificationsEnabled()) {
+            BackgroundMonitorService.start(this);
+        } else {
+            BackgroundMonitorService.stop(this);
+        }
+    }
+
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions,
                                                       int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -3396,6 +3431,7 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
             && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
         getSharedPreferences("notifications", MODE_PRIVATE).edit()
             .putBoolean("enabled", granted).apply();
+        if (granted) syncBackgroundMonitor();
         if (currentScreen == SETTINGS) showSettings();
     }
 
@@ -3467,6 +3503,20 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
     }
 
     private void openPendingNotification() {
+        String targetMachine = pendingNotificationMachine;
+        if (targetMachine != null && !targetMachine.equals(activeMachineId)) {
+            MachineRegistry.Machine machine = findMachine(targetMachine);
+            if (machine == null) {
+                pendingNotificationMachine = null;
+                message("The notification's Mac is no longer saved.");
+                return;
+            }
+            Button source = new Button(this);
+            source.setText("Open notification");
+            connectMachine(machine, source, false);
+            return;
+        }
+        pendingNotificationMachine = null;
         String targetWorkspace = pendingNotificationWorkspace;
         if (targetWorkspace == null || workspaceSnapshot == null || client == null) return;
         pendingNotificationWorkspace = null;
