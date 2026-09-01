@@ -175,7 +175,7 @@ public final class UpdateChecker {
         try {
             PackageInfo info = activity.getPackageManager()
                 .getPackageInfo(activity.getPackageName(), 0);
-            return info.getLongVersionCode();
+            return Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
         } catch (PackageManager.NameNotFoundException error) {
             return 0;
         }

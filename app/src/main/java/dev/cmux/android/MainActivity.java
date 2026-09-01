@@ -503,10 +503,11 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
                     machineRegistry.upsert(legacy);
                     connectMachine(legacy, findMacs, true);
                 } else {
-                    String host = prefs.getString("host", null);
-                    int port = prefs.getInt("port", -1);
-                    if (host != null && port > 0 && auth.accountFingerprint().equals(account)) {
-                        MachineRegistry.Machine legacy = MachineRegistry.Machine.tcp(host, port, host);
+                    String legacyHost = prefs.getString("host", null);
+                    int legacyPort = prefs.getInt("port", -1);
+                    if (legacyHost != null && legacyPort > 0 && auth.accountFingerprint().equals(account)) {
+                        MachineRegistry.Machine legacy = MachineRegistry.Machine.tcp(
+                            legacyHost, legacyPort, legacyHost);
                         machineRegistry.upsert(legacy);
                         connectMachine(legacy, findMacs, true);
                     }
