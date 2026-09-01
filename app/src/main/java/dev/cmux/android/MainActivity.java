@@ -183,6 +183,14 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         capturePairingIntent(getIntent());
         captureNotificationIntent(getIntent());
         if (auth.hasSession()) showConnect(); else showSignIn();
+        reconnectHandler.postDelayed(
+            () -> updateChecker().checkSilently(), 4_000);
+    }
+
+    private UpdateChecker updateCheckerInstance;
+    private UpdateChecker updateChecker() {
+        if (updateCheckerInstance == null) updateCheckerInstance = new UpdateChecker(this);
+        return updateCheckerInstance;
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
@@ -396,6 +404,7 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
         if (pendingPairingLink != null) pairing.setText(pendingPairingLink);
         Button usePairing = secondaryButton("Use pairing link");
         Button scanPairing = secondaryButton("Scan QR code");
+        Button checkUpdates = secondaryButton("Check for updates");
         Button signOut = secondaryButton("Sign out");
 
         TextView privacy = plainText("Encrypted account proof; terminal traffic stays on your Tailscale network.", 13, muted);
@@ -430,6 +439,7 @@ public final class MainActivity extends Activity implements CmuxClient.EventList
                 })
                 .addOnFailureListener(error -> message("Could not scan QR code: " + error.getMessage()));
         });
+        checkUpdates.setOnClickListener(view -> updateChecker().checkManually());
         signOut.setOnClickListener(view -> {
             connectedIrohEndpoint = null;
             reconnectHandler.removeCallbacksAndMessages(null);
