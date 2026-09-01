@@ -19,6 +19,9 @@ public iOS client and Mac host protocol.
 - Remote cmux browser streaming plus a native on-device browser
 - Agent activity feed, Android notifications, deep links, reconcile/read/dismiss
 - Workspace changes, diffs, current/base file preview, and file export
+- Saved multi-Mac registry with one-tap switching between connected hosts
+- Live connection pool with per-Mac status and explicit connect-all action
+- Optional foreground background monitor with machine-aware alerts
 
 The Iroh JNI libraries are built from cmux's pinned `manaflow-ai/iroh-ffi`
 fork (`v1.0.2-cmux.7`) for `arm64-v8a` and `x86_64`.
@@ -31,6 +34,26 @@ fork (`v1.0.2-cmux.7`) for `arm64-v8a` and `x86_64`.
 
 No Claude API traffic originates on Android: Claude Code continues running on
 the Mac, so the Mac's existing proxy and credentials remain authoritative.
+
+## Multi-Mac control
+
+Use **Find my Macs** to discover every pairable Mac on the signed-in cmux
+account. Each selected Mac is saved locally on the phone and can be reopened
+locally from the **Mac:** switcher in the workspace screen. Manual Tailscale
+hosts are saved too. Android keeps connected hosts alive while the app is open;
+the selected Mac owns the active terminal view. Each Mac remains authoritative
+for its own workspaces and terminal state.
+
+The saved registry contains only display and route metadata. Iroh identities and
+account credentials remain in the Android Keystore-backed store.
+
+Enable **Monitor Macs in background** in Settings to keep subscriptions alive
+for saved Macs after the Activity is closed. Android shows one ongoing monitor
+notification plus a per-Mac alert when unread agent activity appears. Disable
+the setting to stop the foreground monitor.
+
+For a private direct TCP route, see [`relay/README.md`](relay/README.md) for the
+tailnet-only Mac relay helper.
 
 ## Build
 
